@@ -1,0 +1,37 @@
+# Keil build products
+MDK-ARM/MAX30102/
+Objects/
+Listings/
+*.o
+*.d
+*.crf
+*.axf
+*.hex
+*.bin
+*.map
+*.lst
+*.lnp
+*.dep
+*.build_log.htm
+*.log
+
+# Personal IDE and debug settings
+*.uvguix.*
+*.uvoptx
+.vscode/
+DebugConfig/
+
+# Local secrets and operating system files
+.env
+.env.*
+Thumbs.db
+.DS_Store
+
+# CMSIS optional components not referenced by this Keil project
+Drivers/CMSIS/docs/
+Drivers/CMSIS/DSP/
+Drivers/CMSIS/NN/
+Drivers/CMSIS/Lib/
+Drivers/CMSIS/Core_A/
+Drivers/CMSIS/RTOS/
+Drivers/CMSIS/RTOS2/
