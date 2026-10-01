@@ -114,6 +114,10 @@ uint8_t beat_detected = 0U;                  /* 本次调用是否刚检测到�
 uint32_t last_beat_ms = 0U;                  /* 上一次有效心跳的系统毫秒时间 */
 uint32_t beat_count = 0U;                    /* 已检测到的心跳总数，供 Watch 验证 */
 
+uint32_t beat_interval_ms = 0U;
+uint32_t inst_heart_rate_bpm = 0U;
+uint8_t heart_rate_valid = 0U;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -255,17 +259,19 @@ void Heartbeat_DetectValley(int32_t ir_sample, uint32_t now_ms)
   /* 判断局部波谷需要三个点。前两次调用只负责收集历史数据。 */
   if (heartbeat_history_count == 0U)
   {
-    ir_prev2 = ir_sample;
+    ir_prev2 = ir_sample;//现在的采样数据放给“前两个采样点”
     heartbeat_history_count = 1U;
     return;
   }
 
   if (heartbeat_history_count == 1U)
   {
-    ir_prev1 = ir_sample;
-    heartbeat_history_count = 2U;
+    ir_prev1 = ir_sample;//现在的采样数据放给上一个采样点
+    heartbeat_history_count = 2U;//历史采样次数从此变为两次，加上正在进行的这一次，数据足够
     return;
   }
+  //要想收集到波谷，就要让 ir_prev1 处于中间位置，ir_prev2 处于前一个位置，ir_sample 处于后一个位置。
+  //即ir_prev1最小
 
   /* TODO M4-A-1：用一个 if 同时判断以下三个条件：
    * 1. ir_prev1 < ir_prev2，并且 ir_prev1 <= ir_sample：中间点是局部波谷；
@@ -278,6 +284,28 @@ void Heartbeat_DetectValley(int32_t ir_sample, uint32_t now_ms)
 
   /* 无论本次是否检测到波谷，都要把窗口向前移动一格：
    * 原来的 B 成为下一轮的 A，本次新点 C 成为下一轮的 B。 */
+
+   //检测到了有效波谷:
+  if(ir_prev1 < ir_prev2 && ir_prev1 <= ir_sample && ir_prev1 < HEARTBEAT_VALLEY_LEVEL && (uint32_t)(now_ms - last_beat_ms) >= HEARTBEAT_REFRACTORY_MS)
+  {
+    if(beat_count == 0)
+    {
+      last_beat_ms = now_ms;
+    }
+    else
+    {
+      beat_interval_ms = now_ms - last_beat_ms;
+      if(beat_interval_ms > 0)
+      {
+        inst_heart_rate_bpm = 60000U / beat_interval_ms;
+        heart_rate_valid = 1U;
+      }
+      else heart_rate_valid = 0;
+      last_beat_ms = now_ms;
+    }
+    beat_detected = 1u;
+    beat_count++;
+  }
   ir_prev2 = ir_prev1;
   ir_prev1 = ir_sample;
 }
