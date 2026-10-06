@@ -65,7 +65,11 @@
  * 当前去直流后的红外光波谷约为负数，因此先用 -100 作为实验起点；
  * 它不是芯片手册规定值，后面要结合实际波形调整。 */
 #define HEARTBEAT_VALLEY_LEVEL  (-100L)
+#define HEARTBEAT_RELEASE_LEVEL  (100L)
 
+//平均光强计数门限
+//无手指约 687～689 稳定放指约 127028～128922 手指距离传感器1厘米左右是25000左右
+#define FINGER_DISTANCE_THRESHOLD (25000L)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -113,11 +117,38 @@ uint8_t heartbeat_history_count = 0U;        /* 已保存的历史点数量，�
 uint8_t beat_detected = 0U;                  /* 本次调用是否刚检测到心跳：1=是，0=否 */
 uint32_t last_beat_ms = 0U;                  /* 上一次有效心跳的系统毫秒时间 */
 uint32_t beat_count = 0U;                    /* 已检测到的心跳总数，供 Watch 验证 */
+uint8_t beat_show_count = 0U;
 
 uint32_t beat_interval_ms = 0U;
 uint32_t inst_heart_rate_bpm = 0U;
 uint8_t heart_rate_valid = 0U;
 
+uint32_t beat_tobe = 0;
+uint32_t beat_deep_count = 0;
+uint32_t beat_time_count = 0;
+uint8_t detection_allow = 1U;
+
+uint32_t interval_count[4] = {0};
+uint16_t next_write_index = 0;
+uint16_t effective_number = 0;
+uint32_t avg_bpm = 0;
+
+//win_data_max_now[2]以及以下两个数组，数组[0]代表红外光，数组[1]代表红光
+uint32_t win_data_bumber_now = 0;
+int32_t win_data_max_now[2] = {0,0};
+int32_t win_data_min_now[2] = {0,0};
+uint32_t win_data_ptp_value_last[2] = {0,0};
+
+int32_t red_dc_avg = 0;
+int32_t ir_dc_avg = 0;
+int32_t sum_ir = 0;
+int32_t sum_red = 0;
+
+uint8_t ef_num_ratio = 0;
+float ef_R = 0;
+
+uint8_t spo2_valid = 0;
+float spo2_est = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -131,8 +162,10 @@ HAL_StatusTypeDef MAX30102_ReadBytes(uint8_t reg, uint8_t *data, uint16_t size);
 void PPG_RemoveDC(uint32_t red, uint32_t ir);
 void PPG_LowPass(int32_t red_input, int32_t ir_input);
 void Heartbeat_DetectValley(int32_t ir_sample, uint32_t now_ms);
-void UART_SendData(uint32_t red, uint32_t ir, int32_t red_pulse, int32_t ir_pulse);
-
+void UART_SendData(uint32_t red, uint32_t ir, int32_t red_pulse, int32_t ir_pulse, uint8_t beat_detected, uint32_t heart_rate_bpm, uint8_t heart_rate_valid, float SPO2_est, uint8_t spo2_valid);
+uint32_t avg_heart_rate(uint32_t beat_interval_ms);
+void peak_to_peak_value_statistics(int32_t ir_filtered, int32_t red_filtered, int32_t ir_dc, int32_t red_dc);
+float relative_ratio_light(uint32_t *win_data_ptp_value_last,int32_t red_dc_avg,int32_t ir_dc_avg);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -243,6 +276,123 @@ void PPG_LowPass(int32_t red_input, int32_t ir_input)
   ir_filtered += (ir_input - ir_filtered) / PPG_FILTER_DIV;
 }
 
+/*SPO2估算函数 
+目的：估算SPO2
+参数 R：红光相对波动与红外相对波动的比值 无单位 要求大于0
+参数 ef_num_ratio：本窗口的R的有效标志，有效比值标志位 1=有效 0=无效
+返回值：估算的SPO2值，范围0~100 返回的SPO2是百分数，所以才要返回0-100
+状态：更新全局spo2_valid 1为通过本轮检查 0为未通过
+状态判定依据：R无效时候不带入公式，且结果在0-100范围内
+
+
+*/
+float SP02_estimation(float R,uint8_t ef_num_ratio)
+{
+  float spo2_est = 0;
+  
+  if(ef_num_ratio == 1 && R > 0)//R=0 代入公式也会得到 94.845，因此必须先排除无效输入，避免把无效窗口转换成看起来正常的估算结果
+  {
+    spo2_est = -45.060 * R * R + 30.354 * R + 94.845;//公式来源：https://www.maximintegrated.com/en/design/technical-documents/app-notes/5/5817.html
+
+    if(spo2_est < 0 || spo2_est > 100)
+    {
+      spo2_valid = 0;
+      spo2_est = 0;
+    }
+    else spo2_valid = 1;
+  }
+  else
+  {
+    spo2_valid = 0;
+    spo2_est = 0;
+  }
+  return spo2_est;
+}
+
+float relative_ratio_light(uint32_t *win_data_ptp_value_last,int32_t red_dc_avg,int32_t ir_dc_avg)
+{
+  float red_ratio = 0;
+  float ir_ratio = 0;
+  float R = 0;
+  if(win_data_ptp_value_last[1] > 0 && win_data_ptp_value_last[0] > 0 && red_dc_avg > 0 && ir_dc_avg > 0)
+  {
+    red_ratio = (float)win_data_ptp_value_last[1]  / (float)red_dc_avg;
+    ir_ratio = (float)win_data_ptp_value_last[0]  / (float)ir_dc_avg;
+    R = red_ratio / ir_ratio;
+    ef_num_ratio = 1;
+  }
+  //if(win_data_ptp_value_last[1] == 0 || win_data_ptp_value_last[0] == 0 || red_dc_avg == 0 || ir_dc_avg == 0)
+  else ef_num_ratio = 0;
+  return R;
+}
+
+void peak_to_peak_value_statistics(int32_t ir_filtered, int32_t red_filtered, int32_t ir_dc, int32_t red_dc)
+{
+  int32_t red_dc_temp = 0;
+  int32_t ir_dc_temp = 0;
+  
+  if(win_data_bumber_now == 0)
+  {
+    win_data_max_now[0] = ir_filtered;
+    win_data_min_now[0] = ir_filtered;
+
+    win_data_max_now[1] = red_filtered;
+    win_data_min_now[1] = red_filtered;
+    ir_dc_temp = ir_dc;
+    red_dc_temp = red_dc;
+    
+  }
+  else
+  {
+    if(ir_filtered > win_data_max_now[0]) win_data_max_now[0] = ir_filtered;
+    if(ir_filtered < win_data_min_now[0]) win_data_min_now[0] = ir_filtered;
+    if(red_filtered > win_data_max_now[1]) win_data_max_now[1] = red_filtered;
+    if(red_filtered < win_data_min_now[1]) win_data_min_now[1] = red_filtered;
+    ir_dc_temp = ir_dc;
+    red_dc_temp = red_dc;
+  }
+  sum_ir += ir_dc_temp;
+  sum_red += red_dc_temp;
+  win_data_bumber_now++;
+  if(win_data_bumber_now == 400)
+  {
+    win_data_ptp_value_last[0] = win_data_max_now[0] - win_data_min_now[0];
+    win_data_ptp_value_last[1] = win_data_max_now[1] - win_data_min_now[1];
+    ir_dc_avg = sum_ir / win_data_bumber_now;
+    red_dc_avg = sum_red / win_data_bumber_now;
+    sum_ir = 0;
+    sum_red = 0;
+    if(ir_dc_avg > FINGER_DISTANCE_THRESHOLD)
+    {
+      ef_R = relative_ratio_light(win_data_ptp_value_last, red_dc_avg, ir_dc_avg);
+    }
+    else
+    {
+      ef_R = 0;
+      ef_num_ratio = 0;
+    }
+    spo2_est = SP02_estimation(ef_R, ef_num_ratio);
+    win_data_bumber_now = 0;
+  }
+}
+
+uint32_t avg_heart_rate(uint32_t beat_interval_ms)
+{
+  uint32_t avg = 0;
+  interval_count[next_write_index] = beat_interval_ms;//保存新间隔
+  next_write_index++;//更新下一步写入位置
+  if(next_write_index >= 4) next_write_index = 0;//循环写入
+  if(effective_number < 4)effective_number++;//有效数量++
+  uint32_t sum = 0;
+  for(int i = 0; i < 4; i++)
+  {
+    sum += interval_count[i];//遍历求和
+  }
+  avg = sum / effective_number;
+  return 60000U / avg;
+}
+
+
 /* M4-A：利用连续三个红外光滤波值寻找局部波谷。
  * ir_sample：本次最新的红外光滤波值。
  * now_ms：调用者通过 HAL_GetTick() 取得的当前时间，单位为 ms。
@@ -255,8 +405,6 @@ void Heartbeat_DetectValley(int32_t ir_sample, uint32_t now_ms)
   /* beat_detected 只表示“本次调用刚刚检测到”。如果本次没有检测到，
    * 必须先清零，否则一次心跳会在后续很多组数据中一直保持为 1。 */
   beat_detected = 0U;
-
-  /* 判断局部波谷需要三个点。前两次调用只负责收集历史数据。 */
   if (heartbeat_history_count == 0U)
   {
     ir_prev2 = ir_sample;//现在的采样数据放给“前两个采样点”
@@ -270,6 +418,8 @@ void Heartbeat_DetectValley(int32_t ir_sample, uint32_t now_ms)
     heartbeat_history_count = 2U;//历史采样次数从此变为两次，加上正在进行的这一次，数据足够
     return;
   }
+  /* 判断局部波谷需要三个点。前两次调用只负责收集历史数据。 */
+
   //要想收集到波谷，就要让 ir_prev1 处于中间位置，ir_prev2 处于前一个位置，ir_sample 处于后一个位置。
   //即ir_prev1最小
 
@@ -284,38 +434,122 @@ void Heartbeat_DetectValley(int32_t ir_sample, uint32_t now_ms)
 
   /* 无论本次是否检测到波谷，都要把窗口向前移动一格：
    * 原来的 B 成为下一轮的 A，本次新点 C 成为下一轮的 B。 */
-
-   //检测到了有效波谷:
-  if(ir_prev1 < ir_prev2 && ir_prev1 <= ir_sample && ir_prev1 < HEARTBEAT_VALLEY_LEVEL && (uint32_t)(now_ms - last_beat_ms) >= HEARTBEAT_REFRACTORY_MS)
+  /*
+  if(ir_prev1 < ir_prev2 && ir_prev1 <= ir_sample)
   {
-    if(beat_count == 0)
+    beat_tobe ++;
+    if(ir_prev1 < HEARTBEAT_VALLEY_LEVEL)
     {
-      last_beat_ms = now_ms;
-    }
-    else
-    {
-      beat_interval_ms = now_ms - last_beat_ms;
-      if(beat_interval_ms > 0)
+      beat_deep_count ++;
+      if((uint32_t)(now_ms - last_beat_ms) >= HEARTBEAT_REFRACTORY_MS)
       {
-        inst_heart_rate_bpm = 60000U / beat_interval_ms;
-        heart_rate_valid = 1U;
+        beat_time_count ++;
+        if(beat_count == 0)
+        {
+          last_beat_ms = now_ms;
+        }
+        else
+        {
+          beat_interval_ms = now_ms - last_beat_ms;
+        if(beat_interval_ms > 0)
+        {
+          inst_heart_rate_bpm = 60000U / beat_interval_ms;
+          heart_rate_valid = 1U;
+        }
+        else heart_rate_valid = 0;
+        last_beat_ms = now_ms;
       }
-      else heart_rate_valid = 0;
-      last_beat_ms = now_ms;
-    }
     beat_detected = 1u;
     beat_count++;
+      }
+    }
   }
+    */
+   //检测到了有效波谷:
+   if(detection_allow == 1U)
+   {
+    if(ir_prev1 < ir_prev2 && ir_prev1 <= ir_sample && ir_prev1 < HEARTBEAT_VALLEY_LEVEL && (uint32_t)(now_ms - last_beat_ms) >= HEARTBEAT_REFRACTORY_MS)
+    {
+      if(beat_count == 0)
+      {
+        last_beat_ms = now_ms;
+      }
+      else
+      {
+        beat_interval_ms = now_ms - last_beat_ms;
+        if(beat_interval_ms > 0)
+        {
+          inst_heart_rate_bpm = (60000U / beat_interval_ms);
+          heart_rate_valid = 1U;
+          avg_bpm = avg_heart_rate(beat_interval_ms);
+        }
+        else heart_rate_valid = 0;
+        last_beat_ms = now_ms;
+      }
+      beat_detected = 1u;
+      beat_count++;
+      detection_allow = 0U;
+    }
+   }
+   else
+   {
+    if(ir_sample > HEARTBEAT_RELEASE_LEVEL)
+    {
+      detection_allow = 1U;
+    }
+   }
+    if(now_ms - last_beat_ms > 3000U)
+    {
+      heart_rate_valid = 0;
+      for(int i = 0; i < 4; i++)
+      {
+        interval_count[i] = 0;
+      }
+      next_write_index = 0;
+      effective_number = 0;
+      avg_bpm = 0;
+      beat_count = 0;
+    }
   ir_prev2 = ir_prev1;
   ir_prev1 = ir_sample;
 }
 
-void UART_SendData(uint32_t red, uint32_t ir, int32_t red_pulse, int32_t ir_pulse)
+
+void UART_SendData(uint32_t red, uint32_t ir, int32_t red_pulse, int32_t ir_pulse, uint8_t beat_detected, uint32_t heart_rate_bpm, uint8_t heart_rate_valid, float spo2_est, uint8_t spo2_valid)
 {
-  char line[64];
-  int len = snprintf(line, sizeof(line), "%lu,%lu,%ld,%ld\r\n",
+  char line[96];
+  uint16_t heartbeat_marker = 0;
+  float spo2_tobe_sent = 0;
+  if(beat_detected)
+  {
+    beat_show_count = 5;
+  }
+  if(beat_show_count > 0)
+  {
+    heartbeat_marker = 10000U;
+    beat_show_count--;
+  }
+  else
+  {
+    heartbeat_marker = 0U;
+  }
+  if(spo2_valid)
+  {
+    spo2_tobe_sent = spo2_est;
+  }
+  else
+  {
+    spo2_tobe_sent = 0;
+  }
+
+  uint32_t heart_rate_to_sent = heart_rate_valid ? heart_rate_bpm : 0U;
+  int len = snprintf(line, sizeof(line), "%lu,%lu,%ld,%ld,%lu,%lu,%.1f,%d\r\n",
                      (unsigned long)red, (unsigned long)ir,
-                     (long)red_pulse, (long)ir_pulse);
+                     (long)red_pulse, (long)ir_pulse,
+                     (unsigned long)heartbeat_marker,
+                     (unsigned long)heart_rate_to_sent,
+                     spo2_tobe_sent,
+                     spo2_valid);
 
   if (len > 0 && len < (int)sizeof(line))
   {
@@ -323,6 +557,8 @@ void UART_SendData(uint32_t red, uint32_t ir, int32_t red_pulse, int32_t ir_puls
                                     (uint16_t)len, 100U);
   }
 }
+
+
 
 /* USER CODE END 0 */
 
@@ -423,9 +659,10 @@ int main(void)
         /* 先分离直流/交流，再把同一时刻的原始值和滤波值一起发送。 */
         PPG_RemoveDC(red_raw, ir_raw);
         PPG_LowPass(red_ac,ir_ac);
+        peak_to_peak_value_statistics(ir_filtered,red_filtered,ir_dc,red_dc);
         /* 每取得一组新的滤波样本就检测一次；HAL_GetTick() 返回开机后的毫秒数。 */
         Heartbeat_DetectValley(ir_filtered, HAL_GetTick());
-        UART_SendData(red_raw, ir_raw, red_filtered, ir_filtered);
+        UART_SendData(red_raw, ir_raw, red_filtered, ir_filtered, beat_detected, avg_bpm, heart_rate_valid, spo2_est,spo2_valid);
       }
     }
     /* TODO M2-B-2：从 FIFO_DATA 一次读 6 字节到 fifo_bytes，
