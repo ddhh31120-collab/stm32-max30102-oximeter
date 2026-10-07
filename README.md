@@ -53,7 +53,7 @@
 1. 使用 Keil MDK 打开 `MDK-ARM/MAX30102.uvprojx`，安装工程需要的 STM32F1 设备支持包与 ARM 编译器。
 2. 执行 Build，连接适配的 SWD 下载器，并按实际硬件设置下载及调试选项。
 3. 串口设置为 **115200 波特率、8 位数据、无校验、1 位停止位**。
-4. 上位机（接收串口数据的电脑）观察每行八列数据：`red_raw,ir_raw,red_filtered,ir_filtered,heartbeat_marker,heart_rate_bpm,spo2_est,spo2_valid`。第三、四列为去直流后经过低通滤波的值；第五列为心跳显示标记；第七列为保留一位小数的 SpO2 估算值。
+4. 上位机观察每行八列数据：`red_raw,ir_raw,red_filtered,ir_filtered,heartbeat_marker,heart_rate_bpm,spo2_est,spo2_valid`。第三、四列为去直流后经过低通滤波的值；第五列为心跳显示标记；第七列为保留一位小数的 SpO2 估算值。
 5. 无效心率输出 0；无效 SpO2 输出 0，且 `spo2_valid` 为 0。有效标志表示通过程序内的检查，不代表测量精度已验证。调试时可观察 `part_id`、`id_status`、`config_status`、`sample_count`、`beat_count` 等变量。
 6. 每 5 组成功采样输出一行；采样接近 100 组/秒时，约为 20 行/秒。使用 VOFA 观察波形时，将每行时间间隔设为约 **50 ms**，并确认窗口正在查看最新数据。第五列心跳标记在待发送事件存在时为 `10000`，否则为 `0`。
 
