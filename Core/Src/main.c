@@ -135,9 +135,12 @@ uint32_t avg_bpm = 0;
 
 //win_data_max_now[2]以及以下两个数组，数组[0]代表红外光，数组[1]代表红光
 uint32_t win_data_bumber_now = 0;
-int32_t win_data_max_now[2] = {0,0};
-int32_t win_data_min_now[2] = {0,0};
-uint32_t win_data_ptp_value_last[2] = {0,0};
+int32_t win_flt_data_max_now[2] = {0,0};
+int32_t win_flt_data_min_now[2] = {0,0};
+int32_t win_dc_data_max_now[2] = {0,0};
+int32_t win_dc_data_min_now[2] = {0,0};
+uint32_t win_flt_data_ptp_value_last[2] = {0,0};
+uint32_t win_dc_data_ptp_value_last[2] = {0,0};
 
 int32_t red_dc_avg = 0;
 int32_t ir_dc_avg = 0;
@@ -149,6 +152,19 @@ float ef_R = 0;
 
 uint8_t spo2_valid = 0;
 float spo2_est = 0;
+
+uint8_t dc_stable = 0;
+
+uint32_t check_count = 0;
+uint32_t statistical_count_threshold = 0;
+uint32_t statistical_time_threhold = 0;
+uint32_t statistical_count_new = 0;
+uint32_t statistical_time_new = 0;
+uint32_t real_read_speed = 0;
+
+uint8_t sample_processed = 5;
+uint8_t heart_pending = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -166,6 +182,9 @@ void UART_SendData(uint32_t red, uint32_t ir, int32_t red_pulse, int32_t ir_puls
 uint32_t avg_heart_rate(uint32_t beat_interval_ms);
 void peak_to_peak_value_statistics(int32_t ir_filtered, int32_t red_filtered, int32_t ir_dc, int32_t red_dc);
 float relative_ratio_light(uint32_t *win_data_ptp_value_last,int32_t red_dc_avg,int32_t ir_dc_avg);
+uint8_t relative_change_dc(uint32_t *win_dc_data_ptp_value_last, int32_t red_dc_avg, int32_t ir_dc_avg);
+void sampling_rate_check(uint32_t sample_count);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -326,6 +345,22 @@ float relative_ratio_light(uint32_t *win_data_ptp_value_last,int32_t red_dc_avg,
   return R;
 }
 
+//程序能完成除法，但是并不能说明输入的波动一定来自我们想测量的脉搏，所以要新增加
+//一个检查，去看看四秒的窗口里，DC这个基线移动了多少
+//返回值：1 == 两路基线都通过稳定性检查   0 == 输入无效或任意一门变化超过门限
+//
+uint8_t relative_change_dc(uint32_t *win_dc_data_ptp_value_last, int32_t red_dc_avg, int32_t ir_dc_avg)
+{
+  if(ir_dc_avg > 0 && red_dc_avg > 0)
+  {
+    float ir_relative_change_dc = (float)win_dc_data_ptp_value_last[0] / (float)ir_dc_avg;
+    float red_relative_change_dc = (float)win_dc_data_ptp_value_last[1] / (float)red_dc_avg;
+    if(ir_relative_change_dc <= 0.05f && red_relative_change_dc <= 0.05f)return 1;
+    else return 0;
+  }
+  else return 0;
+  
+}
 void peak_to_peak_value_statistics(int32_t ir_filtered, int32_t red_filtered, int32_t ir_dc, int32_t red_dc)
 {
   int32_t red_dc_temp = 0;
@@ -333,21 +368,36 @@ void peak_to_peak_value_statistics(int32_t ir_filtered, int32_t red_filtered, in
   
   if(win_data_bumber_now == 0)
   {
-    win_data_max_now[0] = ir_filtered;
-    win_data_min_now[0] = ir_filtered;
+    win_flt_data_max_now[0] = ir_filtered;
+    win_flt_data_min_now[0] = ir_filtered;
 
-    win_data_max_now[1] = red_filtered;
-    win_data_min_now[1] = red_filtered;
+    win_flt_data_max_now[1] = red_filtered;
+    win_flt_data_min_now[1] = red_filtered;
+    //最大值减去最小值就是AC,filtered是滤波后的波形，波形的最大值减去最小值
+    //就可以近似地求ac
+    //求R用的AC是个幅度，而不是某一次采样地red_ac或者ir_ac。我们这里求幅度的目的
+    //就是求R，然后用R去估算spo2
+
+
+    win_dc_data_max_now[0] = ir_dc;
+    win_dc_data_min_now[0] = ir_dc;
+
+    win_dc_data_max_now[1] = red_dc;
+    win_dc_data_min_now[1] = red_dc;
     ir_dc_temp = ir_dc;
     red_dc_temp = red_dc;
     
   }
   else
   {
-    if(ir_filtered > win_data_max_now[0]) win_data_max_now[0] = ir_filtered;
-    if(ir_filtered < win_data_min_now[0]) win_data_min_now[0] = ir_filtered;
-    if(red_filtered > win_data_max_now[1]) win_data_max_now[1] = red_filtered;
-    if(red_filtered < win_data_min_now[1]) win_data_min_now[1] = red_filtered;
+    if(ir_filtered > win_flt_data_max_now[0]) win_flt_data_max_now[0] = ir_filtered;
+    if(ir_filtered < win_flt_data_min_now[0]) win_flt_data_min_now[0] = ir_filtered;
+    if(red_filtered > win_flt_data_max_now[1]) win_flt_data_max_now[1] = red_filtered;
+    if(red_filtered < win_flt_data_min_now[1]) win_flt_data_min_now[1] = red_filtered;
+    if(ir_dc > win_dc_data_max_now[0])win_dc_data_max_now[0] = ir_dc;
+    if(ir_dc < win_dc_data_min_now[0])win_dc_data_min_now[0] = ir_dc;
+    if(red_dc > win_dc_data_max_now[1])win_dc_data_max_now[1] = red_dc;
+    if(red_dc < win_dc_data_min_now[1])win_dc_data_min_now[1] = red_dc;
     ir_dc_temp = ir_dc;
     red_dc_temp = red_dc;
   }
@@ -356,15 +406,29 @@ void peak_to_peak_value_statistics(int32_t ir_filtered, int32_t red_filtered, in
   win_data_bumber_now++;
   if(win_data_bumber_now == 400)
   {
-    win_data_ptp_value_last[0] = win_data_max_now[0] - win_data_min_now[0];
-    win_data_ptp_value_last[1] = win_data_max_now[1] - win_data_min_now[1];
+    win_flt_data_ptp_value_last[0] = win_flt_data_max_now[0] - win_flt_data_min_now[0];
+    win_flt_data_ptp_value_last[1] = win_flt_data_max_now[1] - win_flt_data_min_now[1];
+    win_dc_data_ptp_value_last[0] = win_dc_data_max_now[0] - win_dc_data_min_now[0];
+    win_dc_data_ptp_value_last[1] = win_dc_data_max_now[1] - win_dc_data_min_now[1];
+
     ir_dc_avg = sum_ir / win_data_bumber_now;
     red_dc_avg = sum_red / win_data_bumber_now;
+    dc_stable = relative_change_dc(win_dc_data_ptp_value_last,red_dc_avg,ir_dc_avg);
     sum_ir = 0;
     sum_red = 0;
     if(ir_dc_avg > FINGER_DISTANCE_THRESHOLD)
     {
-      ef_R = relative_ratio_light(win_data_ptp_value_last, red_dc_avg, ir_dc_avg);
+      
+      if(dc_stable)
+      {
+        ef_R = relative_ratio_light(win_flt_data_ptp_value_last, red_dc_avg, ir_dc_avg);
+      }
+      else
+      {
+        ef_R = 0;
+        ef_num_ratio = 0;
+      }
+      
     }
     else
     {
@@ -434,37 +498,6 @@ void Heartbeat_DetectValley(int32_t ir_sample, uint32_t now_ms)
 
   /* 无论本次是否检测到波谷，都要把窗口向前移动一格：
    * 原来的 B 成为下一轮的 A，本次新点 C 成为下一轮的 B。 */
-  /*
-  if(ir_prev1 < ir_prev2 && ir_prev1 <= ir_sample)
-  {
-    beat_tobe ++;
-    if(ir_prev1 < HEARTBEAT_VALLEY_LEVEL)
-    {
-      beat_deep_count ++;
-      if((uint32_t)(now_ms - last_beat_ms) >= HEARTBEAT_REFRACTORY_MS)
-      {
-        beat_time_count ++;
-        if(beat_count == 0)
-        {
-          last_beat_ms = now_ms;
-        }
-        else
-        {
-          beat_interval_ms = now_ms - last_beat_ms;
-        if(beat_interval_ms > 0)
-        {
-          inst_heart_rate_bpm = 60000U / beat_interval_ms;
-          heart_rate_valid = 1U;
-        }
-        else heart_rate_valid = 0;
-        last_beat_ms = now_ms;
-      }
-    beat_detected = 1u;
-    beat_count++;
-      }
-    }
-  }
-    */
    //检测到了有效波谷:
    if(detection_allow == 1U)
    {
@@ -513,21 +546,41 @@ void Heartbeat_DetectValley(int32_t ir_sample, uint32_t now_ms)
   ir_prev2 = ir_prev1;
   ir_prev1 = ir_sample;
 }
+//检查实际采样速率
+void sampling_rate_check(uint32_t sample_count)
+{
+  uint32_t time = HAL_GetTick();
 
+  if(check_count == 0)
+  {
+    statistical_count_threshold = sample_count;
+    statistical_time_threhold = time;
+    check_count++;
+  }
+  if(check_count > 0 && (time - statistical_time_threhold) >= 1000)
+  {
+    statistical_count_new = sample_count - statistical_count_threshold;
+    statistical_time_new = time - statistical_time_threhold;
+    real_read_speed = statistical_count_new * 1000 / statistical_time_new;
+    statistical_count_threshold = sample_count;
+    statistical_time_threhold = time;
+  }
+  
+}
 
 void UART_SendData(uint32_t red, uint32_t ir, int32_t red_pulse, int32_t ir_pulse, uint8_t beat_detected, uint32_t heart_rate_bpm, uint8_t heart_rate_valid, float spo2_est, uint8_t spo2_valid)
 {
+  static uint8_t send_countdown = 5;  // 距离下次发送还需要处理的采样组数
   char line[96];
   uint16_t heartbeat_marker = 0;
   float spo2_tobe_sent = 0;
   if(beat_detected)
   {
-    beat_show_count = 5;
+    heart_pending = 1;
   }
-  if(beat_show_count > 0)
+  if(heart_pending ==1)
   {
     heartbeat_marker = 10000U;
-    beat_show_count--;
   }
   else
   {
@@ -541,20 +594,24 @@ void UART_SendData(uint32_t red, uint32_t ir, int32_t red_pulse, int32_t ir_puls
   {
     spo2_tobe_sent = 0;
   }
-
+  send_countdown--;
   uint32_t heart_rate_to_sent = heart_rate_valid ? heart_rate_bpm : 0U;
-  int len = snprintf(line, sizeof(line), "%lu,%lu,%ld,%ld,%lu,%lu,%.1f,%d\r\n",
+  if(send_countdown == 0)
+  {
+    int len = snprintf(line, sizeof(line), "%lu,%lu,%ld,%ld,%lu,%lu,%.1f,%d\r\n",
                      (unsigned long)red, (unsigned long)ir,
                      (long)red_pulse, (long)ir_pulse,
                      (unsigned long)heartbeat_marker,
                      (unsigned long)heart_rate_to_sent,
                      spo2_tobe_sent,
                      spo2_valid);
-
-  if (len > 0 && len < (int)sizeof(line))
-  {
-    uart_status = HAL_UART_Transmit(&huart1, (uint8_t *)line,
+    if (len > 0 && len < (int)sizeof(line))
+    {
+      uart_status = HAL_UART_Transmit(&huart1, (uint8_t *)line,
                                     (uint16_t)len, 100U);
+      if(uart_status == HAL_OK)heart_pending = 0;
+    }
+    send_countdown = 5;
   }
 }
 
@@ -665,6 +722,7 @@ int main(void)
         UART_SendData(red_raw, ir_raw, red_filtered, ir_filtered, beat_detected, avg_bpm, heart_rate_valid, spo2_est,spo2_valid);
       }
     }
+    sampling_rate_check(sample_count);
     /* TODO M2-B-2：从 FIFO_DATA 一次读 6 字节到 fifo_bytes，
      * 返回状态存入 fifo_status。只有 fifo_status == HAL_OK 才处理数据。 */
     
@@ -672,7 +730,7 @@ int main(void)
      * 每个结果只保留低 18 位（掩码 0x3FFFF）；成功后 sample_count++。
      * 提示：先把每个 uint8_t 转为 uint32_t，再左移 16 位或 8 位。 */
 
-    HAL_Delay(5); /* 传感器每 10 ms 产一组；每 5 ms 查看一次以便及时取走。 */
+    HAL_Delay(1); /* 传感器每 10 ms 产一组；每 5 ms 查看一次以便及时取走。 */
   }
   /* USER CODE END 3 */
 }
