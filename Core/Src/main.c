@@ -164,6 +164,10 @@ uint32_t real_read_speed = 0;
 
 uint8_t sample_processed = 5;
 uint8_t heart_pending = 0;
+uint8_t sample_active = 0;
+uint8_t sample_count_flag = 0;
+
+volatile uint8_t test_pause_sample = 0;
 
 /* USER CODE END PV */
 
@@ -184,6 +188,8 @@ void peak_to_peak_value_statistics(int32_t ir_filtered, int32_t red_filtered, in
 float relative_ratio_light(uint32_t *win_data_ptp_value_last,int32_t red_dc_avg,int32_t ir_dc_avg);
 uint8_t relative_change_dc(uint32_t *win_dc_data_ptp_value_last, int32_t red_dc_avg, int32_t ir_dc_avg);
 void sampling_rate_check(uint32_t sample_count);
+void No_new_sample_No_old_sample(uint32_t sample_count);
+void Result_invalid(uint8_t sample_active);
 
 /* USER CODE END PFP */
 
@@ -568,6 +574,67 @@ void sampling_rate_check(uint32_t sample_count)
   
 }
 
+void No_new_sample_No_old_sample(uint32_t sample_count)
+{
+
+  static uint32_t last_sample = 0;
+  static uint32_t time_last = 0;
+  uint32_t time_new = 0;
+  uint32_t time_count = 0;
+
+  if(sample_count_flag == 0)
+  {
+    if(sample_count == 0)
+    {
+      sample_active = 0;
+    }
+    else if(sample_count > 0)
+    {
+      sample_active = 1;
+    }
+    last_sample = sample_count;
+    sample_count_flag++;
+    time_last = HAL_GetTick();
+  }
+  else
+  {
+    time_new = HAL_GetTick();
+    if(last_sample == sample_count)
+    {
+      time_count = time_new - time_last;
+      if(time_count >= 1000)
+      {
+        sample_active = 0;
+      }
+    }
+    else
+    {
+      sample_active = 1;
+      last_sample = sample_count;
+      time_last = HAL_GetTick();
+    }
+  }
+}
+
+void Result_invalid(uint8_t sample_active)
+{
+  if(sample_active == 0)
+  {
+    heart_rate_valid = 0;//心率结果失效
+    spo2_valid = 0;//血氧结果失效
+
+    avg_bpm = 0;
+     spo2_est = 0.0f;
+
+    beat_detected = 0;
+     heart_pending = 0;
+  }
+}
+
+void HeartBeat_reset_status()
+{
+  
+}
 void UART_SendData(uint32_t red, uint32_t ir, int32_t red_pulse, int32_t ir_pulse, uint8_t beat_detected, uint32_t heart_rate_bpm, uint8_t heart_rate_valid, float spo2_est, uint8_t spo2_valid)
 {
   static uint8_t send_countdown = 5;  // 距离下次发送还需要处理的采样组数
@@ -614,8 +681,6 @@ void UART_SendData(uint32_t red, uint32_t ir, int32_t red_pulse, int32_t ir_puls
     send_countdown = 5;
   }
 }
-
-
 
 /* USER CODE END 0 */
 
@@ -696,13 +761,13 @@ int main(void)
      * 两次读取的 size 都是 1，因为每个指针寄存器只有一个字节。 */
     wr_status = MAX30102_ReadBytes(MAX30102_REG_FIFO_WR_PTR, &fifo_wr_ptr, 1U);
     rd_status = MAX30102_ReadBytes(MAX30102_REG_FIFO_RD_PTR, &fifo_rd_ptr, 1U);
-
     /* TODO M2-B-1：两次指针读取都成功，且 wr_ptr != rd_ptr，才有未读样本。
      * 用一个 if 包住下面的 M2-B-2 和 M2-B-3；没数据时不要读 FIFO。 */
     if(wr_status == HAL_OK && rd_status == HAL_OK && fifo_wr_ptr != fifo_rd_ptr)
     {
+
       fifo_status = MAX30102_ReadBytes(MAX30102_REG_FIFO_DATA,fifo_bytes,6u);
-      if(fifo_status == HAL_OK)
+      if(fifo_status == HAL_OK && test_pause_sample == 0)
       {
         red_raw = ((uint32_t)fifo_bytes[0] << 16)
                  |((uint32_t)fifo_bytes[1] << 8)
@@ -723,6 +788,8 @@ int main(void)
       }
     }
     sampling_rate_check(sample_count);
+    No_new_sample_No_old_sample(sample_count);
+    Result_invalid(sample_active);
     /* TODO M2-B-2：从 FIFO_DATA 一次读 6 字节到 fifo_bytes，
      * 返回状态存入 fifo_status。只有 fifo_status == HAL_OK 才处理数据。 */
     
