@@ -405,6 +405,66 @@
               <FileType>1</FileType>
               <FilePath>../Core/Src/stm32f1xx_hal_msp.c</FilePath>
             </File>
+            <File>
+              <FileName>max30102.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\max30102.c</FilePath>
+            </File>
+            <File>
+              <FileName>max30102.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\max30102.h</FilePath>
+            </File>
+            <File>
+              <FileName>ppg_filter.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\ppg_filter.h</FilePath>
+            </File>
+            <File>
+              <FileName>ppg_filter.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\ppg_filter.c</FilePath>
+            </File>
+            <File>
+              <FileName>heart_rate.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\heart_rate.h</FilePath>
+            </File>
+            <File>
+              <FileName>heart_rate.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\heart_rate.c</FilePath>
+            </File>
+            <File>
+              <FileName>spo2.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\spo2.c</FilePath>
+            </File>
+            <File>
+              <FileName>spo2.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\spo2.h</FilePath>
+            </File>
+            <File>
+              <FileName>sample_monitor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\sample_monitor.c</FilePath>
+            </File>
+            <File>
+              <FileName>sample_monitor.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\sample_monitor.h</FilePath>
+            </File>
+            <File>
+              <FileName>vofa_uart.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\vofa_uart.c</FilePath>
+            </File>
+            <File>
+              <FileName>vofa_uart.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\vofa_uart.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
