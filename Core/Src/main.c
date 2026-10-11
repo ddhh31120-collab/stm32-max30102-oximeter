@@ -18,6 +18,11 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include "main.h"
 #include "max30102.h"
 #include "ppg_filter.h"
 #include "heart_rate.h"
@@ -26,16 +31,25 @@
 #include "vofa_uart.h"
 
 
-
-/* Private includes ----------------------------------------------------------*/
-/* USER CODE BEGIN Includes */
-
-
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+typedef struct {
+  uint32_t red_raw;
+  uint32_t ir_raw;
+  int32_t red_filtered;
+  int32_t ir_filtered;
 
+  uint8_t beat_detected;
+  uint32_t avg_bpm;
+  uint8_t heart_rate_valid;
+
+  float spo2_est;
+  uint8_t spo2_valid;
+
+  uint8_t sample_active;
+}MeasurementFrame_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -50,8 +64,23 @@
 
 /* Private variables ---------------------------------------------------------*/
 I2C_HandleTypeDef hi2c1;
+
 UART_HandleTypeDef huart1;
 
+/* Definitions for countTaskA */
+osThreadId_t countTaskAHandle;
+const osThreadAttr_t countTaskA_attributes = {
+  .name = "countTaskA",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for countTaskB */
+osThreadId_t countTaskBHandle;
+const osThreadAttr_t countTaskB_attributes = {
+  .name = "countTaskB",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
 /* USER CODE BEGIN PV */
 uint8_t part_id = 0;                         /* Keil Watch: 预期 0x15 */
 HAL_StatusTypeDef id_status = HAL_ERROR;     /* Keil Watch: 预期 HAL_OK */
@@ -67,7 +96,19 @@ uint32_t sample_count = 0;                   /* 成功读取的样本组数，�
 HAL_StatusTypeDef fifo_status = HAL_ERROR;
 
 volatile uint8_t test_pause_sample = 0;
+volatile uint32_t Task_A_count = 0;
+volatile uint32_t Task_B_count = 0;
+volatile uint32_t stacksapce_A = 0;
+volatile uint32_t stacksapce_B = 0;
 
+
+
+osMessageQueueId_t measurementQueueHandle = NULL;
+
+volatile osStatus_t Ret_status= osOK;
+volatile uint32_t os_count = 0;  
+
+volatile uint32_t queue_full_count = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -75,6 +116,9 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_USART1_UART_Init(void);
+void StartCountTaskA(void *argument);
+void StartCountTaskB(void *argument);
+
 /* USER CODE BEGIN PFP */
 
 void Result_invalid(uint8_t sample_active);
@@ -84,6 +128,8 @@ void Result_invalid(uint8_t sample_active);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+
+  //两个任务单独计数
 
 void Result_invalid(uint8_t sample_active)
 {
@@ -96,13 +142,22 @@ void Result_invalid(uint8_t sample_active)
      spo2_est = 0.0f;
 
     beat_detected = 0;
-    heart_pending = 0;
     HeartBeat_reset_status();//重置心跳采样状态
     PPG_ResetFilter();
     SPO2_ResetWindow();
   }
 }
 
+void Task_A()
+{
+  
+  Task_A_count++;
+}
+void Task_B()
+{
+  
+  Task_B_count++;
+}
 
 /* USER CODE END 0 */
 
@@ -163,6 +218,48 @@ int main(void)
 
   /* USER CODE END 2 */
 
+  /* Init scheduler */
+  osKernelInitialize();
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  measurementQueueHandle = osMessageQueueNew(4,sizeof(MeasurementFrame_t),NULL);
+  if(measurementQueueHandle == NULL)Error_Handler();
+
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* creation of countTaskA */
+  countTaskAHandle = osThreadNew(StartCountTaskA, NULL, &countTaskA_attributes);
+
+  /* creation of countTaskB */
+  countTaskBHandle = osThreadNew(StartCountTaskB, NULL, &countTaskB_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_EVENTS */
+  /* add events, ... */
+  /* USER CODE END RTOS_EVENTS */
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
+
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
@@ -170,48 +267,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    /* M2-B：每轮查看 FIFO 的写/读指针。指针只占 5 位，范围 0~31；
-     * 两次读取的 size 都是 1，因为每个指针寄存器只有一个字节。 */
-    
-    beat_detected = 0U;
-    /* TODO M2-B-1：两次指针读取都成功，且 wr_ptr != rd_ptr，才有未读样本。
-     * 用一个 if 包住下面的 M2-B-2 和 M2-B-3；没数据时不要读 FIFO。 */
-    uint8_t ready = 0;
-    HAL_StatusTypeDef read_status = HAL_ERROR;
-    read_status = MAX30102_DataReady(&ready);
-    if(read_status == HAL_OK && ready == 1)
-    {
-        fifo_status = MAX30102_ReadSample(&red_raw, &ir_raw);
-        if(fifo_status == HAL_OK && test_pause_sample == 0)
-        {
-          sample_count++;
-          /* 先分离直流/交流，再把同一时刻的原始值和滤波值一起发送。 */
-          PPG_RemoveDC(red_raw, ir_raw);
-          PPG_LowPass(red_ac,ir_ac);
-          peak_to_peak_value_statistics(ir_filtered,red_filtered,ir_dc,red_dc);
-          /* 每取得一组新的滤波样本就检测一次；HAL_GetTick() 返回开机后的毫秒数。 */
-          Heartbeat_DetectValley(ir_filtered, HAL_GetTick());
-        }
-        
-        
-    }
-    
-    sampling_rate_check(sample_count);//判断采样速率
-    No_new_sample_No_old_sample(sample_count);//sample_active 是否有新样本
-    Result_invalid(sample_active);//beat_detected = 0;heart_pending = 0;
-    //尚未收到样本或采样超时时，清除结果并重置算法历史
-
-    UART_SendData(red_raw, ir_raw, red_filtered, ir_filtered, beat_detected, avg_bpm, heart_rate_valid, spo2_est,spo2_valid);
-    
-    
-    /* TODO M2-B-2：从 FIFO_DATA 一次读 6 字节到 fifo_bytes，
-     * 返回状态存入 fifo_status。只有 fifo_status == HAL_OK 才处理数据。 */
-    
-    /* TODO M2-B-3：按大端顺序拼接：前 3 字节是 red_raw，后 3 字节是 ir_raw。
-     * 每个结果只保留低 18 位（掩码 0x3FFFF）；成功后 sample_count++。
-     * 提示：先把每个 uint8_t 转为 uint32_t，再左移 16 位或 8 位。 */
-
-    HAL_Delay(1); /* 传感器每 10 ms 产一组；每 5 ms 查看一次以便及时取走。 */
+   
   }
   /* USER CODE END 3 */
 }
@@ -342,6 +398,124 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 
 /* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartCountTaskA */
+/**
+  * @brief  Function implementing the countTaskA thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartCountTaskA */
+void StartCountTaskA(void *argument)
+{
+  /* USER CODE BEGIN 5 */
+  MeasurementFrame_t frame = {0};
+  uint8_t beat_queue_pending = 0;
+  /* Infinite loop */
+  for(;;)
+  {
+    Task_A();
+    beat_detected = 0U;
+    /* TODO M2-B-1：两次指针读取都成功，且 wr_ptr != rd_ptr，才有未读样本。
+     * 用一个 if 包住下面的 M2-B-2 和 M2-B-3；没数据时不要读 FIFO。 */
+    uint8_t ready = 0;
+    HAL_StatusTypeDef read_status = HAL_ERROR;
+    read_status = MAX30102_DataReady(&ready);
+    if(read_status == HAL_OK && ready == 1)
+    {
+        fifo_status = MAX30102_ReadSample(&red_raw, &ir_raw);
+        if(fifo_status == HAL_OK && test_pause_sample == 0)
+        {
+          sample_count++;
+          /* 先分离直流/交流，再把同一时刻的原始值和滤波值一起发送。 */
+          PPG_RemoveDC(red_raw, ir_raw);
+          PPG_LowPass(red_ac,ir_ac);
+          peak_to_peak_value_statistics(ir_filtered,red_filtered,ir_dc,red_dc);
+          /* 每取得一组新的滤波样本就检测一次；HAL_GetTick() 返回开机后的毫秒数。 */
+          Heartbeat_DetectValley(ir_filtered, HAL_GetTick());
+        }
+        
+        
+    }
+    
+    sampling_rate_check(sample_count);//判断采样速率
+    No_new_sample_No_old_sample(sample_count);//sample_active 是否有新样本
+    Result_invalid(sample_active);//beat_detected = 0;
+    //尚未收到样本或采样超时时，清除结果并重置算法历史
+    if(sample_active == 0)beat_queue_pending = 0;
+    else if(beat_detected == 1)beat_queue_pending = 1;
+      frame.red_raw = red_raw;
+      frame.ir_raw = ir_raw;
+      frame.red_filtered = red_filtered;
+      frame.ir_filtered = ir_filtered;
+      frame.beat_detected = beat_queue_pending;
+      frame.avg_bpm = avg_bpm;
+      frame.heart_rate_valid = heart_rate_valid;
+      frame.spo2_est = spo2_est;
+      frame.spo2_valid = spo2_valid;
+      frame.sample_active = sample_active;
+      Ret_status = osMessageQueuePut(measurementQueueHandle,&frame,0,0);
+    if(Ret_status == osOK){os_count++;beat_queue_pending = 0;}
+    if(Ret_status == osErrorResource)queue_full_count++;
+
+    
+    osDelay(1);
+  }
+  /* USER CODE END 5 */
+}
+
+/* USER CODE BEGIN Header_StartCountTaskB */
+/**
+* @brief Function implementing the countTaskB thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartCountTaskB */
+void StartCountTaskB(void *argument)
+{
+  /* USER CODE BEGIN StartCountTaskB */
+  MeasurementFrame_t receive_frame = {0};
+  osStatus_t get_status = osOK;
+  
+  /* Infinite loop */
+  for(;;)
+  {
+
+    get_status = osMessageQueueGet(measurementQueueHandle,&receive_frame,NULL,osWaitForever);
+    if(get_status == osOK)
+    {
+      Task_B();
+      stacksapce_A = osThreadGetStackSpace(countTaskAHandle);
+      stacksapce_B = osThreadGetStackSpace(countTaskBHandle);
+      if(receive_frame.sample_active == 0)heart_pending = 0;
+      UART_SendData(receive_frame.red_raw, receive_frame.ir_raw, receive_frame.red_filtered, receive_frame.ir_filtered, receive_frame.beat_detected, receive_frame.avg_bpm, receive_frame.heart_rate_valid, receive_frame.spo2_est,receive_frame.spo2_valid);
+    }
+    
+  }
+  /* USER CODE END StartCountTaskB */
+}
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM4 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM4)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.
