@@ -50,6 +50,16 @@ typedef struct {
 
   uint8_t sample_active;
 }MeasurementFrame_t;
+
+typedef enum
+{
+  RTOS_START_NO_ERROR = 0,
+  RTOS_START_QUEUE_FAILED = 1,
+  RTOS_START_TASK_A_FAILED = 2,
+  RTOS_START_TASK_B_FAILED = 3,
+  RTOS_START_KERNEL_INIT_FAILED = 4,
+  RTOS_START_SCHEDULER_RETURNED = 5
+}RTOSStartError_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -81,6 +91,9 @@ const osThreadAttr_t countTaskB_attributes = {
   .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
+
+
+
 /* USER CODE BEGIN PV */
 uint8_t part_id = 0;                         /* Keil Watch: 预期 0x15 */
 HAL_StatusTypeDef id_status = HAL_ERROR;     /* Keil Watch: 预期 HAL_OK */
@@ -109,6 +122,13 @@ volatile osStatus_t Ret_status= osOK;
 volatile uint32_t os_count = 0;  
 
 volatile uint32_t queue_full_count = 0;
+
+volatile uint8_t test_pause_receive = 0;
+volatile uint8_t beat_queue_pending_watch = 0;
+
+volatile RTOSStartError_t rtos_start_error = RTOS_START_NO_ERROR;
+
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -222,6 +242,11 @@ int main(void)
   osKernelInitialize();
 
   /* USER CODE BEGIN RTOS_MUTEX */
+  if(osKernelGetState() != osKernelReady)
+  {
+    rtos_start_error = RTOS_START_KERNEL_INIT_FAILED;
+    Error_Handler();
+  }
   /* add mutexes, ... */
   /* USER CODE END RTOS_MUTEX */
 
@@ -235,7 +260,12 @@ int main(void)
 
   /* USER CODE BEGIN RTOS_QUEUES */
   measurementQueueHandle = osMessageQueueNew(4,sizeof(MeasurementFrame_t),NULL);
-  if(measurementQueueHandle == NULL)Error_Handler();
+  if(measurementQueueHandle == NULL)
+  {
+    rtos_start_error = RTOS_START_QUEUE_FAILED;
+    Error_Handler();
+  }
+  
 
   /* add queues, ... */
   /* USER CODE END RTOS_QUEUES */
@@ -248,6 +278,16 @@ int main(void)
   countTaskBHandle = osThreadNew(StartCountTaskB, NULL, &countTaskB_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
+  if(countTaskAHandle == NULL)
+  {
+    rtos_start_error = RTOS_START_TASK_A_FAILED;
+    Error_Handler();
+  }
+  if(countTaskBHandle == NULL)
+  {
+    rtos_start_error = RTOS_START_TASK_B_FAILED;
+    Error_Handler();
+  }
   /* add threads, ... */
   /* USER CODE END RTOS_THREADS */
 
@@ -267,7 +307,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-   
+   rtos_start_error = RTOS_START_SCHEDULER_RETURNED;
+   Error_Handler();
   }
   /* USER CODE END 3 */
 }
@@ -458,7 +499,7 @@ void StartCountTaskA(void *argument)
     if(Ret_status == osOK){os_count++;beat_queue_pending = 0;}
     if(Ret_status == osErrorResource)queue_full_count++;
 
-    
+    beat_queue_pending_watch = beat_queue_pending;
     osDelay(1);
   }
   /* USER CODE END 5 */
@@ -480,7 +521,11 @@ void StartCountTaskB(void *argument)
   /* Infinite loop */
   for(;;)
   {
-
+    if(test_pause_receive != 0)
+    {
+      osDelay(10);
+      continue;
+    }
     get_status = osMessageQueueGet(measurementQueueHandle,&receive_frame,NULL,osWaitForever);
     if(get_status == osOK)
     {

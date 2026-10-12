@@ -12,6 +12,130 @@ uint32_t first_config_fail_sr2 = 0;          /* 第一次失败时 I2C1 状态�
 
 extern I2C_HandleTypeDef hi2c1;
 
+volatile MAX30102_RecoveryDiag max30102_recovery = {0};
+
+#define MAX30102_SCL_PIN GPIO_PIN_6
+#define MAX30102_SDA_PIN GPIO_PIN_7
+#define MAX30102_LINE_WAIT_MS 5U
+
+static HAL_StatusTypeDef MAX30102_WaitLine(uint16_t pin, GPIO_PinState level)
+{
+  uint32_t wait_ms;
+  for (wait_ms = 0; wait_ms < MAX30102_LINE_WAIT_MS; ++wait_ms)
+  {
+    if (HAL_GPIO_ReadPin(GPIOB, pin) == level) return HAL_OK;
+    HAL_Delay(1);
+  }
+  return HAL_GPIO_ReadPin(GPIOB, pin) == level ? HAL_OK : HAL_TIMEOUT;
+}
+
+/* Single-controller bus, only used after a failed startup transaction.
+ * SDA stuck low: up to 9 clocks (NXP UM10204, bus clear).
+ * Lines released but BUSY stuck: ST ES096 rev15 section 2.8.7 sequence.
+ * Every driven high is open-drain release, never push-pull high. */
+static HAL_StatusTypeDef MAX30102_RecoverStartupBus(void)
+{
+  GPIO_InitTypeDef gpio = {0};
+  HAL_StatusTypeDef status = HAL_TIMEOUT;
+  HAL_StatusTypeDef init_status;
+  uint32_t wait_ms;
+
+  ++max30102_recovery.attempts;
+  max30102_recovery.stage = MAX30102_RECOVERY_GUARD;
+  max30102_recovery.clock_pulses = 0;
+  if (hi2c1.Instance != I2C1 || hi2c1.Lock != HAL_UNLOCKED ||
+      hi2c1.State != HAL_I2C_STATE_READY || __get_IPSR() != 0U ||
+      __get_PRIMASK() != 0U)
+  {
+    max30102_recovery.bus_status = HAL_BUSY;
+    return HAL_BUSY;
+  }
+
+  /* Capture only after transfer failure, before touching the peripheral. */
+  max30102_recovery.error_before = hi2c1.ErrorCode;
+  max30102_recovery.sr2_before = hi2c1.Instance->SR2;
+  max30102_recovery.scl_before = (uint8_t)HAL_GPIO_ReadPin(GPIOB, MAX30102_SCL_PIN);
+  max30102_recovery.sda_before = (uint8_t)HAL_GPIO_ReadPin(GPIOB, MAX30102_SDA_PIN);
+
+  __HAL_I2C_DISABLE(&hi2c1);
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  HAL_GPIO_WritePin(GPIOB, MAX30102_SCL_PIN | MAX30102_SDA_PIN, GPIO_PIN_SET);
+  gpio.Pin = MAX30102_SCL_PIN | MAX30102_SDA_PIN;
+  gpio.Mode = GPIO_MODE_OUTPUT_OD;
+  gpio.Pull = GPIO_NOPULL;
+  gpio.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(GPIOB, &gpio);
+  HAL_Delay(1);
+
+  max30102_recovery.stage = MAX30102_RECOVERY_RELEASE_SCL;
+  if (MAX30102_WaitLine(MAX30102_SCL_PIN, GPIO_PIN_SET) != HAL_OK) goto restore;
+
+  /* A reset may have interrupted the sensor in the middle of a byte. */
+  max30102_recovery.stage = MAX30102_RECOVERY_RELEASE_SDA;
+  while (HAL_GPIO_ReadPin(GPIOB, MAX30102_SDA_PIN) == GPIO_PIN_RESET &&
+         max30102_recovery.clock_pulses < 9U)
+  {
+    HAL_GPIO_WritePin(GPIOB, MAX30102_SCL_PIN, GPIO_PIN_RESET);
+    HAL_Delay(1);
+    HAL_GPIO_WritePin(GPIOB, MAX30102_SCL_PIN, GPIO_PIN_SET);
+    ++max30102_recovery.clock_pulses;
+    max30102_recovery.stage = MAX30102_RECOVERY_RELEASE_SCL;
+    if (MAX30102_WaitLine(MAX30102_SCL_PIN, GPIO_PIN_SET) != HAL_OK) goto restore;
+    HAL_Delay(1);
+    max30102_recovery.stage = MAX30102_RECOVERY_RELEASE_SDA;
+  }
+  if (MAX30102_WaitLine(MAX30102_SDA_PIN, GPIO_PIN_SET) != HAL_OK) goto restore;
+
+  /* ES096: force both line transitions, checking the actual input levels.
+   * This produces START then STOP; do not issue any sensor data write here. */
+  max30102_recovery.stage = MAX30102_RECOVERY_SDA_LOW;
+  HAL_GPIO_WritePin(GPIOB, MAX30102_SDA_PIN, GPIO_PIN_RESET);
+  if (MAX30102_WaitLine(MAX30102_SDA_PIN, GPIO_PIN_RESET) != HAL_OK) goto restore;
+  HAL_Delay(1);
+  max30102_recovery.stage = MAX30102_RECOVERY_SCL_LOW;
+  HAL_GPIO_WritePin(GPIOB, MAX30102_SCL_PIN, GPIO_PIN_RESET);
+  if (MAX30102_WaitLine(MAX30102_SCL_PIN, GPIO_PIN_RESET) != HAL_OK) goto restore;
+  HAL_Delay(1);
+  max30102_recovery.stage = MAX30102_RECOVERY_SCL_HIGH;
+  HAL_GPIO_WritePin(GPIOB, MAX30102_SCL_PIN, GPIO_PIN_SET);
+  if (MAX30102_WaitLine(MAX30102_SCL_PIN, GPIO_PIN_SET) != HAL_OK) goto restore;
+  HAL_Delay(1);
+  max30102_recovery.stage = MAX30102_RECOVERY_SDA_HIGH;
+  HAL_GPIO_WritePin(GPIOB, MAX30102_SDA_PIN, GPIO_PIN_SET);
+  if (MAX30102_WaitLine(MAX30102_SDA_PIN, GPIO_PIN_SET) != HAL_OK) goto restore;
+  HAL_Delay(1);
+  status = HAL_OK;
+
+restore:
+  /* Also restore pin mode on failure. Keep the failing stage for Watch. */
+  HAL_GPIO_WritePin(GPIOB, MAX30102_SCL_PIN | MAX30102_SDA_PIN, GPIO_PIN_SET);
+  gpio.Mode = GPIO_MODE_AF_OD;
+  HAL_GPIO_Init(GPIOB, &gpio);
+  if (status == HAL_OK) max30102_recovery.stage = MAX30102_RECOVERY_REINIT;
+  /* The local HAL init asserts/clears SWRST, restores timing, then sets PE. */
+  init_status = HAL_I2C_Init(&hi2c1);
+  if (status == HAL_OK) status = init_status;
+  if (status == HAL_OK)
+  {
+    max30102_recovery.stage = MAX30102_RECOVERY_VERIFY_IDLE;
+    status = HAL_BUSY;
+    for (wait_ms = 0; wait_ms < MAX30102_LINE_WAIT_MS; ++wait_ms)
+    {
+      if (__HAL_I2C_GET_FLAG(&hi2c1, I2C_FLAG_BUSY) == RESET)
+      {
+        status = HAL_OK;
+        break;
+      }
+      HAL_Delay(1);
+    }
+  }
+  max30102_recovery.scl_after = (uint8_t)HAL_GPIO_ReadPin(GPIOB, MAX30102_SCL_PIN);
+  max30102_recovery.sda_after = (uint8_t)HAL_GPIO_ReadPin(GPIOB, MAX30102_SDA_PIN);
+  max30102_recovery.bus_status = status;
+  if (status == HAL_OK) max30102_recovery.stage = MAX30102_RECOVERY_DONE;
+  return status;
+}
+
 
 HAL_StatusTypeDef MAX30102_WriteReg(uint8_t reg, uint8_t value)
 {
@@ -56,7 +180,7 @@ HAL_StatusTypeDef MAX30102_ReadBytes(uint8_t reg, uint8_t *data, uint16_t size)
       100U);                              /* 超时上限 100 ms */
 }
 
-HAL_StatusTypeDef MAX30102_Init(void)
+static HAL_StatusTypeDef MAX30102_ConfigureOnce(void)
 { HAL_StatusTypeDef status;
   status = MAX30102_WriteReg(MAX30102_REG_MODE_CONFIG,0x40);
   if(status != HAL_OK)return status;
@@ -80,6 +204,26 @@ HAL_StatusTypeDef MAX30102_Init(void)
   if(status != HAL_OK)return status;
  
   return HAL_OK;
+}
+
+HAL_StatusTypeDef MAX30102_Init(void)
+{
+  HAL_StatusTypeDef status = MAX30102_ConfigureOnce();
+  max30102_recovery.first_init_status = status;
+  if (status == HAL_OK) return HAL_OK;
+
+  /* Do not hide missing-device NACKs or retry arbitrary FIFO reads/writes.
+   * Only startup BUSY/TIMEOUT takes the recovery path, once per Init call. */
+  if (status != HAL_BUSY && status != HAL_TIMEOUT &&
+      (hi2c1.ErrorCode & HAL_I2C_ERROR_TIMEOUT) == 0U) return status;
+
+  max30102_recovery.retry_init_status = HAL_ERROR;
+  status = MAX30102_RecoverStartupBus();
+  if (status != HAL_OK) return status;
+
+  status = MAX30102_ConfigureOnce();
+  max30102_recovery.retry_init_status = status;
+  return status;
 }
 
 HAL_StatusTypeDef MAX30102_ReadSample(uint32_t *red_raw,uint32_t *ir_raw)
