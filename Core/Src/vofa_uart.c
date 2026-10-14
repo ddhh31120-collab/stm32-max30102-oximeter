@@ -2,7 +2,6 @@
 #include "stm32f1xx_hal.h"
 #include <stdio.h>  /* snprintf：把整数格式化为串口可发送的文本 */
 
-uint8_t sample_processed = 5;
  uint8_t heart_pending = 0;
 HAL_StatusTypeDef uart_status = HAL_ERROR;   /* 最近一次串口发送状态，供 Watch 观察 */
 extern UART_HandleTypeDef huart1;

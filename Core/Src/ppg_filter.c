@@ -16,11 +16,7 @@ uint8_t low_pass_ready = 0U;                 /* 0=尚无初始样本，1=低通�
 
 void PPG_RemoveDC(uint32_t red, uint32_t ir)
 {
-  /* TODO M3-B-1：第一组样本只用于初始化基线，避免启动时产生巨大尖峰。
-   * 当 dc_filter_ready == 0U 时：
-   *   red_dc、ir_dc 分别设为当前 red、ir（转换成 int32_t）；
-   *   red_ac、ir_ac 清零；dc_filter_ready 置 1U；然后 return。
-   * 为什么要 return：第一组数据只确定“起点”，还没有足够历史可分离脉搏。 */
+  /* 第一组样本只用于初始化基线，避免启动时产生巨大尖峰。 */
   if(dc_filter_ready == 0U)
   {
     red_dc = (int32_t)red;
@@ -29,13 +25,12 @@ void PPG_RemoveDC(uint32_t red, uint32_t ir)
     dc_filter_ready = 1;
     return; 
   }
-  /* TODO M3-B-2：分别处理红光和红外光，每路两行。
+  /*分别处理红光和红外光，每路两行。
    * 第一步更新基线：
    *   dc += ((int32_t)raw - dc) / PPG_DC_DIV;
-   * 含义：计算“当前值与旧基线的距离”，每次只走这段距离的 1/32。
    * 第二步得到脉搏分量：
    *   ac = (int32_t)raw - dc;
-   * 顺序不能反：先更新本次基线，再用本次原始值减去它。 */
+   * 先更新本次基线，再用本次原始值减去它。 */
   red_dc += ((int32_t)red - red_dc) / PPG_DC_DIV;
   ir_dc += ((int32_t)ir - ir_dc) / PPG_DC_DIV;
   red_ac = (int32_t)red - red_dc;
@@ -55,11 +50,8 @@ void PPG_LowPass(int32_t red_input, int32_t ir_input)
     return;
   }
 
-  /* TODO M3-C-1：更新 red_filtered。
-   * 公式：filtered += (input - filtered) / PPG_FILTER_DIV;
-   * 含义：求新输入与旧结果的距离，本次只走这段距离的 1/4。 */
+  /* 更新 red_filtered */
    red_filtered += (red_input - red_filtered) / PPG_FILTER_DIV;
-  /* TODO M3-C-2：用相同公式更新 ir_filtered。 */
   ir_filtered += (ir_input - ir_filtered) / PPG_FILTER_DIV;
 }
 

@@ -5,10 +5,10 @@
 
 
 
-uint8_t first_config_fail_reg = 0xFFU;       /* 0xFF = 九次配置写入均未报告失败 */
+uint8_t first_config_fail_reg = 0xFFU;       
 HAL_StatusTypeDef first_config_fail_status = HAL_OK;
-uint32_t first_config_fail_state = 0;        /* 第一次失败时 HAL I2C 句柄的状态 */
-uint32_t first_config_fail_sr2 = 0;          /* 第一次失败时 I2C1 状态寄存器 SR2 */
+uint32_t first_config_fail_state = 0;        
+uint32_t first_config_fail_sr2 = 0;         
 
 extern I2C_HandleTypeDef hi2c1;
 
@@ -184,7 +184,7 @@ static HAL_StatusTypeDef MAX30102_ConfigureOnce(void)
 { HAL_StatusTypeDef status;
   status = MAX30102_WriteReg(MAX30102_REG_MODE_CONFIG,0x40);
   if(status != HAL_OK)return status;
-  HAL_Delay(10); /* 等传感器完成复位；它不会自动执行复位，仍需完成上面的 TODO。 */
+  HAL_Delay(10); 
   /* TODO M2-A-2：其余八次寄存器写入写在这里 */
   status = MAX30102_WriteReg(MAX30102_REG_FIFO_CONFIG,0x10);
   if(status != HAL_OK)return status;

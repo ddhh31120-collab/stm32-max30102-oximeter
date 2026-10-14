@@ -63,7 +63,6 @@ float SP02_estimation(float R,uint8_t ef_num_ratio)
 //程序能完成除法，但是并不能说明输入的波动一定来自我们想测量的脉搏，所以要新增加
 //一个检查，去看看四秒的窗口里，DC这个基线移动了多少
 //返回值：1 == 两路基线都通过稳定性检查   0 == 输入无效或任意一门变化超过门限
-//
 uint8_t relative_change_dc(uint32_t *win_dc_data_ptp_value_last, int32_t red_dc_avg, int32_t ir_dc_avg)
 {
   if(ir_dc_avg > 0 && red_dc_avg > 0)
@@ -108,8 +107,6 @@ void peak_to_peak_value_statistics(int32_t ir_filtered, int32_t red_filtered, in
     //就可以近似地求ac
     //求R用的AC是个幅度，而不是某一次采样地red_ac或者ir_ac。我们这里求幅度的目的
     //就是求R，然后用R去估算spo2
-
-
     win_dc_data_max_now[0] = ir_dc;
     win_dc_data_min_now[0] = ir_dc;
 
@@ -150,7 +147,6 @@ void peak_to_peak_value_statistics(int32_t ir_filtered, int32_t red_filtered, in
     
     if(ir_dc_avg > FINGER_DISTANCE_THRESHOLD)
     {
-      
       if(dc_stable)
       {
         ef_R = relative_ratio_light(win_flt_data_ptp_value_last, red_dc_avg, ir_dc_avg);
@@ -160,7 +156,6 @@ void peak_to_peak_value_statistics(int32_t ir_filtered, int32_t red_filtered, in
         ef_R = 0;
         ef_num_ratio = 0;
       }
-      
     }
     else
     {

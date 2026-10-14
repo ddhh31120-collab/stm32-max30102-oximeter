@@ -95,16 +95,16 @@ const osThreadAttr_t countTaskB_attributes = {
 
 
 /* USER CODE BEGIN PV */
-uint8_t part_id = 0;                         /* Keil Watch: 预期 0x15 */
-HAL_StatusTypeDef id_status = HAL_ERROR;     /* Keil Watch: 预期 HAL_OK */
-uint8_t mode_reg = 0;                        /* Keil Watch: M2-A 完成后应为 0x03 */
-HAL_StatusTypeDef mode_status = HAL_ERROR;   /* Keil Watch: 模式寄存器读取状态 */
-HAL_StatusTypeDef config_status = HAL_ERROR; /* Keil Watch: 最近一次配置写入的状态 */
+uint8_t part_id = 0;                         
+HAL_StatusTypeDef id_status = HAL_ERROR;     
+uint8_t mode_reg = 0;                        
+HAL_StatusTypeDef mode_status = HAL_ERROR;   
+HAL_StatusTypeDef config_status = HAL_ERROR; 
 
-uint32_t red_raw = 0;                        /* 拼接后的红光原始值，最多 18 位 */
-uint32_t ir_raw = 0;                         /* 拼接后的红外光原始值，最多 18 位 */
+uint32_t red_raw = 0;                        
+uint32_t ir_raw = 0;                         
 
-uint32_t sample_count = 0;                   /* 成功读取的样本组数，供 Watch 观察 */
+uint32_t sample_count = 0;                   
 
 HAL_StatusTypeDef fifo_status = HAL_ERROR;
 
@@ -127,6 +127,8 @@ volatile uint8_t test_pause_receive = 0;
 volatile uint8_t beat_queue_pending_watch = 0;
 
 volatile RTOSStartError_t rtos_start_error = RTOS_START_NO_ERROR;
+
+
 
 
 /* USER CODE END PV */
@@ -216,13 +218,6 @@ int main(void)
 
    /* MAX30102_Init()
    * 每次把返回值交给 config_status；最后在 Watch 查看它是否为 HAL_OK。
-   * 1. MODE_CONFIG <- 0x40：复位传感器，避免上一次调试留下旧设置。
-   * 2. 复位后等待 10 ms；下面的 HAL_Delay 已经写好。
-   * 3. FIFO_CONFIG <- 0x10：每次保留原始样本；满时允许覆盖旧数据。
-   * 4. SPO2_CONFIG <- 0x27：ADC 量程 4096 nA、100 组/秒、18 位。
-   * 5. LED1_PA、LED2_PA <- 0x1F：红光和红外光各约 6.2 mA。
-   * 6. FIFO_WR_PTR、OVF_COUNTER、FIFO_RD_PTR <- 0x00：清空旧数据。
-   * 7. MODE_CONFIG <- 0x03：最后启动 SpO2 模式（红光 + 红外光）。
     */
   config_status = MAX30102_Init();
   if(config_status != HAL_OK)
@@ -452,15 +447,19 @@ void StartCountTaskA(void *argument)
   /* USER CODE BEGIN 5 */
   MeasurementFrame_t frame = {0};
   uint8_t beat_queue_pending = 0;
+  uint32_t last_queue_sample_count = 0;
+  uint8_t last_queued_sample_active = 0;
+  uint32_t last_queue_ms = HAL_GetTick();
   /* Infinite loop */
   for(;;)
   {
     Task_A();
     beat_detected = 0U;
-    /* TODO M2-B-1：两次指针读取都成功，且 wr_ptr != rd_ptr，才有未读样本。
+    /* 两次指针读取都成功，且 wr_ptr != rd_ptr，才有未读样本。
      * 用一个 if 包住下面的 M2-B-2 和 M2-B-3；没数据时不要读 FIFO。 */
     uint8_t ready = 0;
     HAL_StatusTypeDef read_status = HAL_ERROR;
+    uint32_t now_ms = HAL_GetTick();
     read_status = MAX30102_DataReady(&ready);
     if(read_status == HAL_OK && ready == 1)
     {
@@ -495,9 +494,22 @@ void StartCountTaskA(void *argument)
       frame.spo2_est = spo2_est;
       frame.spo2_valid = spo2_valid;
       frame.sample_active = sample_active;
-      Ret_status = osMessageQueuePut(measurementQueueHandle,&frame,0,0);
-    if(Ret_status == osOK){os_count++;beat_queue_pending = 0;}
-    if(Ret_status == osErrorResource)queue_full_count++;
+      if(now_ms - last_queue_ms >= 100U || sample_count != last_queue_sample_count
+          || sample_active != last_queued_sample_active || beat_queue_pending == 1)
+          {
+            Ret_status = osMessageQueuePut(measurementQueueHandle,&frame,0,0);
+            if(Ret_status == osOK)
+            {
+              os_count++;
+              beat_queue_pending = 0;
+              last_queue_sample_count = sample_count;
+              last_queued_sample_active = sample_active;
+              last_queue_ms = now_ms;
+
+            }
+            if(Ret_status == osErrorResource)queue_full_count++;
+          }
+      
 
     beat_queue_pending_watch = beat_queue_pending;
     osDelay(1);
